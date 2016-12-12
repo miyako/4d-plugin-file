@@ -1,0 +1,1 @@
+﻿{"name":"File","id":20000,"commands":[{"theme":"File","syntax":"FILE Get id(&T;&T;&T):L"},{"theme":"File","syntax":"FILE Get path(&T;&T;&T):L"}]}
