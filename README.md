@@ -20,10 +20,8 @@ error:=FILE Get id (pathIn;volumeNumberOut;fileNumberOut)
 param|type|description
 ------------|------|----
 pathIn|TEXT|
-volumeNumberOut|TEXT|``FSCatalogInfo.volume (FSVolumeRefNum)`` on Mac
-``FILE_ID_INFO.VolumeSerialNumber (ULONGLONG)`` on Windows
-fileNumberOut|TEXT|``FSCatalogInfo.nodeID (UInt32)`` on Mac
-``FILE_ID_INFO.VolumeSerialNumber (FILE_ID_128)`` on Windows 
+volumeNumberOut|TEXT|``FSCatalogInfo.volume (FSVolumeRefNum)`` on Mac, ``FILE_ID_INFO.VolumeSerialNumber (ULONGLONG)`` on Windows
+fileNumberOut|TEXT|``FSCatalogInfo.nodeID (UInt32)`` on Mac, ``FILE_ID_INFO.VolumeSerialNumber (FILE_ID_128)`` on Windows 
 
 ```
 error:=FILE Get path (pathOut;volumeNumberIn;fileNumberIn)
