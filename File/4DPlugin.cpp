@@ -123,6 +123,14 @@ int pathResolveRefID(C_TEXT &path, C_TEXT &volumeID, C_TEXT &fileID)
 								if (GetFinalPathNameByHandle(hFile, &buf[0], len, 0))
 								{
 									std::wstring _path = (const wchar_t *)&buf[0];
+									BY_HANDLE_FILE_INFORMATION info;
+									if (GetFileInformationByHandle(hFile, &info))
+									{
+										if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == FILE_ATTRIBUTE_DIRECTORY)
+										{
+											_path += L"\\";
+										}
+									}
 									path.setUTF16String((const PA_Unichar *)_path.substr(4).c_str(), _path.size());
 								}
 								else {
@@ -159,26 +167,25 @@ int pathGetRefID(C_TEXT &path, C_TEXT &volumeID, C_TEXT &fileID)
 														OPEN_EXISTING,
 														FILE_ATTRIBUTE_NORMAL,
 														NULL);
+	if (hFile == INVALID_HANDLE_VALUE)
+	{
+		if (_path.back() == '\\')
+		{
+			_path = _path.substr(0, _path.length()-1);
+		}
+		hFile = CreateFile((LPCTSTR)_path.c_str(),
+			READ_CONTROL,
+			0,
+			NULL,
+			OPEN_EXISTING,
+			FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+			NULL);
+	}
 	if(hFile != INVALID_HANDLE_VALUE)
 	{
 		BY_HANDLE_FILE_INFORMATION info;
 		if(GetFileInformationByHandle(hFile, &info))
 		{
-			/*
-			FILE_OBJECTID_BUFFER buf;
-			DWORD cbOut;
-			if (DeviceIoControl(hFile,
-													FSCTL_CREATE_OR_GET_OBJECT_ID,
-													NULL,
-													0,
-													&buf,
-													sizeof(buf),
-													&cbOut,
-													NULL))
-			{
-				fileID.setUTF8String((const uint8_t *)buf.ObjectId, sizeof(GUID));
-			}
-			 */
 			DWORD _volumeID = info.dwVolumeSerialNumber;
 			unsigned __int64 _fileID = info.nFileIndexHigh;
 			_fileID = (_fileID << 32) | info.nFileIndexLow;
