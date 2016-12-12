@@ -17,6 +17,18 @@ Convert file/folder path to volume/file number and back
 error:=FILE Get id (pathIn;volumeNumberOut;fileNumberOut)
 ```
 
+param|type|description
+------------|------|----
+pathIn|TEXT|
+volumeNumberOut|TEXT|
+fileNumberOut|TEXT|
+
 ```
 error:=FILE Get path (pathOut;volumeNumberIn;fileNumberIn)
 ```
+
+param|type|description
+------------|------|----
+pathOut|TEXT|
+volumeNumberIn|TEXT|
+fileNumberIn|TEXT|
