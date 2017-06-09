@@ -19,7 +19,7 @@ However, the file number will change, if the file is physically recreated on the
 
 Some applications such as Microsoft Office __create a new file after every save operation__. The file number will be changed as a result.
 
-### Syntax
+## Syntax
 
 ```
 error:=FILE Get id (pathIn;volumeNumberOut;fileNumberOut)
