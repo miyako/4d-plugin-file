@@ -12,6 +12,17 @@
 #include "4DPluginAPI.h"
 #include "4DPlugin.h"
 #include <sstream>
+#include <string>
+#include <vector>
+#include <cstdlib>
+
+/*
+ plugin-defined error codes (in addition to Win32 GetLastError() codes on Windows
+ and OSErr codes on macOS)
+ */
+#define FILE_ERR_GENERIC           (-1)
+#define FILE_ERR_VOLUME_NOT_FOUND  (-2) /* Windows: no mounted volume has this serial number */
+#define FILE_ERR_EXCEPTION         (-3) /* internal exception caught inside a command handler */
 
 void PluginMain(PA_long32 selector, PA_PluginParameters params)
 {
@@ -52,7 +63,8 @@ void CommandDispatcher (PA_long32 pProcNum, sLONG_PTR *pResult, PackagePtr pPara
 
 int pathResolveRefID(C_TEXT &path, C_TEXT &volumeID, C_TEXT &fileID)
 {
-	int err = 0;
+	/* stays FILE_ERR_VOLUME_NOT_FOUND unless a volume with a matching serial number is found */
+	int err = FILE_ERR_VOLUME_NOT_FOUND;
 	wchar_t buf[MAX_PATH];
 	std::vector<std::wstring>volumes;
 	HANDLE hFirstVolume;
@@ -72,83 +84,108 @@ int pathResolveRefID(C_TEXT &path, C_TEXT &volumeID, C_TEXT &fileID)
 		FindVolumeClose(hFirstVolume);
 	}
 
-	DWORD volumeSerialNumber = _wtoi((const wchar_t *)volumeID.getUTF16StringPtr());
+	/* the serial number is an unsigned 32-bit value; _wtoi saturated at INT_MAX */
+	DWORD volumeSerialNumber = (DWORD)wcstoul((const wchar_t *)volumeID.getUTF16StringPtr(), NULL, 10);
 	unsigned __int64 _fileNumber = _wcstoui64((const wchar_t *)fileID.getUTF16StringPtr(), NULL, 10);
 
 	LARGE_INTEGER fileNumber;
-	fileNumber.HighPart = _fileNumber >> 32;
-	fileNumber.LowPart = _fileNumber & 0x00000000FFFFFFFF;
+	fileNumber.QuadPart = (LONGLONG)_fileNumber;
 
 	for (std::vector<std::wstring>::iterator it = volumes.begin(); it != volumes.end(); ++it)
 	{
 		std::wstring volume = *it;
-		DWORD _volumeSerialNumber;
-			if (GetVolumeInformation(volume.c_str(),
-				NULL,
-				0,
-				&_volumeSerialNumber,
-				NULL,
-				NULL,
-				NULL,
-				0
-			)) 
-			{
-				if (volumeSerialNumber == _volumeSerialNumber) {
-					HANDLE hVolume = CreateFile((LPCTSTR)volume.substr(0, volume.length() - 1).c_str(),
-						READ_CONTROL,
-						0,
-						NULL,
-						OPEN_EXISTING,
-						FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-						NULL);
-					if (hVolume != INVALID_HANDLE_VALUE)
-					{
-						FILE_ID_DESCRIPTOR fd;
-						fd.dwSize = sizeof(FILE_ID_DESCRIPTOR);
-						fd.Type = FileIdType;
-						fd.FileId = fileNumber;
+		DWORD _volumeSerialNumber = 0;
+		if (GetVolumeInformation(volume.c_str(),
+			NULL,
+			0,
+			&_volumeSerialNumber,
+			NULL,
+			NULL,
+			NULL,
+			0
+		)) 
+		{
+			if (volumeSerialNumber == _volumeSerialNumber) {
+				err = 0;
+				HANDLE hVolume = CreateFile((LPCTSTR)volume.substr(0, volume.length() - 1).c_str(),
+					READ_CONTROL,
+					0,
+					NULL,
+					OPEN_EXISTING,
+					FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+					NULL);
+				if (hVolume != INVALID_HANDLE_VALUE)
+				{
+					FILE_ID_DESCRIPTOR fd;
+					fd.dwSize = sizeof(FILE_ID_DESCRIPTOR);
+					fd.Type = FileIdType;
+					fd.FileId = fileNumber;
 
-						HANDLE hFile = OpenFileById(hVolume,
-							&fd, 
-							FILE_GENERIC_READ,
-							0,
-							NULL, 
-							0);
-						if (hFile != INVALID_HANDLE_VALUE)
+					HANDLE hFile = OpenFileById(hVolume,
+						&fd, 
+						FILE_GENERIC_READ,
+						0,
+						NULL, 
+						0);
+					if (hFile != INVALID_HANDLE_VALUE)
+					{
+						DWORD len = GetFinalPathNameByHandle(hFile, NULL, 0, 0);
+						if (len)
 						{
-							DWORD len = GetFinalPathNameByHandle(hFile, NULL, 0, 0);
-							if (len)
+							std::vector<wchar_t>buf(len+1);
+							DWORD ret = GetFinalPathNameByHandle(hFile, &buf[0], len, 0);
+							/*
+							 on success ret excludes the terminating null (ret < len);
+							 if the path grew between the two calls (rename), ret is the
+							 new required size (ret >= len) and buf is not valid
+							 */
+							if (ret && ret < len)
 							{
-								std::vector<wchar_t>buf(len+1);
-								if (GetFinalPathNameByHandle(hFile, &buf[0], len, 0))
+								std::wstring _path(&buf[0], ret);
+								BY_HANDLE_FILE_INFORMATION info;
+								if (GetFileInformationByHandle(hFile, &info))
 								{
-									std::wstring _path = (const wchar_t *)&buf[0];
-									BY_HANDLE_FILE_INFORMATION info;
-									if (GetFileInformationByHandle(hFile, &info))
+									if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == FILE_ATTRIBUTE_DIRECTORY)
 									{
-										if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == FILE_ATTRIBUTE_DIRECTORY)
-										{
-											_path += L"\\";
-										}
+										_path += L"\\";
 									}
-									path.setUTF16String((const PA_Unichar *)_path.substr(4).c_str(), _path.size());
 								}
-								else {
-									err = -1;
+								/* strip the \\?\ (or \\?\UNC\) prefix without assuming its presence */
+								std::wstring out;
+								if (_path.compare(0, 8, L"\\\\?\\UNC\\") == 0)
+								{
+									out = L"\\\\" + _path.substr(8);
 								}
+								else if (_path.compare(0, 4, L"\\\\?\\") == 0)
+								{
+									out = _path.substr(4);
+								}
+								else
+								{
+									out = _path;
+								}
+								/* length must match the string actually passed (was an over-read by 4) */
+								path.setUTF16String((const PA_Unichar *)out.c_str(), out.size());
 							}
 							else {
-								err = GetLastError();
+								err = FILE_ERR_GENERIC;
 							}
-							CloseHandle(hFile);
 						}
-						CloseHandle(hVolume);
+						else {
+							err = GetLastError();
+						}
+						CloseHandle(hFile);
 					}
-					break;
+					else {
+						err = GetLastError();
+					}
+					CloseHandle(hVolume);
 				}
-		}
-		{
-
+				else {
+					err = GetLastError();
+				}
+				break;
+			}
 		}
 	}
 	return err;
@@ -198,7 +235,7 @@ int pathGetRefID(C_TEXT &path, C_TEXT &volumeID, C_TEXT &fileID)
 			volumeID.setUTF8String((const uint8_t *)vv.c_str(), vv.size());
 			fileID.setUTF8String((const uint8_t *)ff.c_str(), ff.size());
 		}else{
-			err = -1;
+			err = FILE_ERR_GENERIC;
 		}
 		CloseHandle(hFile);
 	}else{
@@ -211,40 +248,45 @@ int pathGetRefID(C_TEXT &path, C_TEXT &volumeID, C_TEXT &fileID)
 #if VERSIONMAC
 int pathGetFSRefID(C_TEXT &path, FSVolumeRefNum *volumeID, UInt32 *fileID)
 {
-    int err = -1;
+    int err = FILE_ERR_GENERIC;
     NSString *_path = path.copyPath();
-    FSRef fSRef;
-    NSURL *url = [[NSURL alloc]initFileURLWithPath:_path];
-    if(url)
+    /* initFileURLWithPath: raises NSInvalidArgumentException on nil */
+    if(_path)
     {
-        if(CFURLGetFSRef((CFURLRef)url, &fSRef))
+        FSRef fSRef;
+        NSURL *url = [[NSURL alloc]initFileURLWithPath:_path];
+        if(url)
         {
-            FSCatalogInfo catalogInfo;
-            err = FSGetCatalogInfo(&fSRef,
-            kFSCatInfoNodeID|kFSCatInfoVolume,
-            &catalogInfo,
-            NULL, NULL, NULL);
-            if(err == noErr)
+            if(CFURLGetFSRef((CFURLRef)url, &fSRef))
             {
-                *volumeID = catalogInfo.volume;
-                *fileID = catalogInfo.nodeID;
-                err = 0;
+                FSCatalogInfo catalogInfo;
+                err = FSGetCatalogInfo(&fSRef,
+                kFSCatInfoNodeID|kFSCatInfoVolume,
+                &catalogInfo,
+                NULL, NULL, NULL);
+                if(err == noErr)
+                {
+                    *volumeID = catalogInfo.volume;
+                    *fileID = catalogInfo.nodeID;
+                    err = 0;
+                }
             }
+            [url release];
         }
-        [url release];
+        [_path release];
     }
-    [_path release];
     return err;
 }
 #endif
 
+/* not called from CommandDispatcher */
 #if VERSIONMAC
 int pathGetFileSystemNumbers(C_TEXT &path, NSInteger *volumeID, NSUInteger *fileID)
 {
-    int err = -1;
+    int err = FILE_ERR_GENERIC;
     NSFileManager * defaultManager = [NSFileManager defaultManager];
     NSString *_path = path.copyPath();
-    NSError *error;
+    NSError *error = nil;
     NSDictionary *attributes;
     attributes = [defaultManager attributesOfFileSystemForPath:_path error:&error];
     if(attributes)
@@ -259,44 +301,51 @@ int pathGetFileSystemNumbers(C_TEXT &path, NSInteger *volumeID, NSUInteger *file
             err = 0;
             
         }else{
-            err = [error code];
+            err = (int)[error code];
         }
     }else{
-        err = [error code];
+        err = (int)[error code];
     }
     [_path release];
     return err;
 }
 #endif
 
+/* not called from CommandDispatcher */
 #if VERSIONMAC
 NSString *pathGetReferenceUrl(C_TEXT &path)
 {
     NSString *referenceUrl = @"";
     NSString *_path = path.copyPath();
-    NSURL *url = [[NSURL alloc]initFileURLWithPath:_path];
-    if(url)
+    if(_path)
     {
-        CFErrorRef error;
-        CFURLRef _url = CFURLCreateFileReferenceURL(kCFAllocatorDefault, (CFURLRef)url, &error);
-        if(_url)
+        NSURL *url = [[NSURL alloc]initFileURLWithPath:_path];
+        if(url)
         {
-            referenceUrl = [(NSURL *)_url absoluteString];
-            [(NSURL *)_url release];
+            /* NULL: we don't consume the error, and a returned CFErrorRef would be ours to release */
+            CFURLRef _url = CFURLCreateFileReferenceURL(kCFAllocatorDefault, (CFURLRef)url, NULL);
+            if(_url)
+            {
+                /* keep the string alive independently of _url */
+                referenceUrl = [[[(NSURL *)_url absoluteString] retain] autorelease];
+                CFRelease(_url);
+            }
+            [url release];
         }
-        [url release];
+        [_path release];
     }
     return referenceUrl;
 }
 #endif
 
+/* not called from CommandDispatcher */
 #if VERSIONMAC
 NSString *getFileSystemPath(C_TEXT &fileSystemNumber)
 {
     NSString *fileSystemPath = @"";
     NSString *_fileSystemNumber = fileSystemNumber.copyUTF16String();
     NSNumber *__fileSystemNumber = [NSNumber numberWithUnsignedLong:[_fileSystemNumber longLongValue]];
-    NSError *error;
+    NSError *error = nil;
     NSFileManager * defaultManager = [NSFileManager defaultManager];
     NSArray *volumeUrls = [defaultManager mountedVolumeURLsIncludingResourceValuesForKeys:nil options:0];
     if(volumeUrls)
@@ -323,7 +372,7 @@ NSString *getFileSystemPath(C_TEXT &fileSystemNumber)
 #if VERSIONMAC
 int pathResolveFSRefID(C_TEXT &path, C_TEXT &volumeID, C_TEXT &fileID)
 {
-    int err = -1;
+    int err = FILE_ERR_GENERIC;
     NSString *_volumeID = volumeID.copyUTF16String();
     NSString *_fileID = fileID.copyUTF16String();
     FSVolumeRefNum __volumeID = [[NSNumber numberWithInteger:[_volumeID integerValue]]shortValue];
@@ -334,16 +383,20 @@ int pathResolveFSRefID(C_TEXT &path, C_TEXT &volumeID, C_TEXT &fileID)
         NSURL *url = (NSURL *)CFURLCreateFromFSRef(kCFAllocatorDefault, &fSRef);
         if(url)
         {
-					NSString *_path = (NSString *)CFURLCopyFileSystemPath((CFURLRef)url, kCFURLHFSPathStyle);
-					if(CFURLHasDirectoryPath((CFURLRef)url))
-					 {
-						path.setUTF16String([NSString stringWithFormat:@"%@:", _path]);
-					 }else{
-						path.setUTF16String(_path);
-					 }
-					
-					 [_path release];
-            err = 0;
+            NSString *_path = (NSString *)CFURLCopyFileSystemPath((CFURLRef)url, kCFURLHFSPathStyle);
+            if(_path)
+            {
+                if(CFURLHasDirectoryPath((CFURLRef)url))
+                {
+                    path.setUTF16String([NSString stringWithFormat:@"%@:", _path]);
+                }else{
+                    path.setUTF16String(_path);
+                }
+                [_path release];
+                err = 0;
+            }
+            /* Create rule: we own url (was leaked on every call) */
+            CFRelease((CFURLRef)url);
         }
     }
     [_volumeID release];
@@ -361,21 +414,32 @@ void FILE_Get_id(sLONG_PTR *pResult, PackagePtr pParams)
 
 	Param1.fromParamAtIndex(pParams, 1);
 
+	/* a local catch guarantees setReturn is always reached */
+	try
+	{
 #if VERSIONMAC
-    UInt32 fileID;
-    FSVolumeRefNum volumeID;
-    int err = pathGetFSRefID(Param1, &volumeID, &fileID);
-    if(err)
-    {
-        returnValue.setIntValue(err);
-    }else
-    {
-        Param2.setUTF16String([NSString stringWithFormat:@"%hd", volumeID]);
-        Param3.setUTF16String([NSString stringWithFormat:@"%u", (unsigned int)fileID]);
-    }
+		@autoreleasepool
+		{
+			UInt32 fileID;
+			FSVolumeRefNum volumeID;
+			int err = pathGetFSRefID(Param1, &volumeID, &fileID);
+			if(err)
+			{
+				returnValue.setIntValue(err);
+			}else
+			{
+				Param2.setUTF16String([NSString stringWithFormat:@"%hd", volumeID]);
+				Param3.setUTF16String([NSString stringWithFormat:@"%u", (unsigned int)fileID]);
+			}
+		}
 #else
-	returnValue.setIntValue(pathGetRefID(Param1, Param2, Param3));
+		returnValue.setIntValue(pathGetRefID(Param1, Param2, Param3));
 #endif
+	}
+	catch(...)
+	{
+		returnValue.setIntValue(FILE_ERR_EXCEPTION);
+	}
 
 	Param2.toParamAtIndex(pParams, 2);
 	Param3.toParamAtIndex(pParams, 3);
@@ -392,13 +456,23 @@ void FILE_Get_path(sLONG_PTR *pResult, PackagePtr pParams)
 	Param2.fromParamAtIndex(pParams, 2);
 	Param3.fromParamAtIndex(pParams, 3);
 
+	/* a local catch guarantees setReturn is always reached */
+	try
+	{
 #if VERSIONMAC
-	returnValue.setIntValue(pathResolveFSRefID(Param1, Param2, Param3));
+		@autoreleasepool
+		{
+			returnValue.setIntValue(pathResolveFSRefID(Param1, Param2, Param3));
+		}
 #else
-	returnValue.setIntValue(pathResolveRefID(Param1, Param2, Param3));
+		returnValue.setIntValue(pathResolveRefID(Param1, Param2, Param3));
 #endif
+	}
+	catch(...)
+	{
+		returnValue.setIntValue(FILE_ERR_EXCEPTION);
+	}
 
 	Param1.toParamAtIndex(pParams, 1);
 	returnValue.setReturn(pResult);
 }
-
