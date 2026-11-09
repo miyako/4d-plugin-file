@@ -9,6 +9,85 @@ The File plugin converts a file or folder path into a pair of file-system identi
 
 **Platforms:** macOS, Windows
 
+## Manual versioning and publication
+
+**Bump version** and **Build** are independent manual Actions workflows.
+Select the branch explicitly for Bump, then select patch/minor/major. Bump
+checks out the immutable dispatch SHA, requires a clean checkout and an unchanged
+remote branch, and commits only source display metadata to that branch. Its
+mandatory executable pre-push guard checks exactly one advertised update: the
+old SHA must equal the selected SHA, the literal new SHA must equal local HEAD,
+and its direct parent and target must match the selection. Late advances,
+ancestor rewinds, deletions and same-result races fail closed. It uses a
+non-force push with both `push.followTags=false` and `--no-follow-tags`.
+It creates no tags and does not trigger Build.
+
+**Build** has no inputs and runs only via `workflow_dispatch`. Select the desired
+source ref; every job checks out the same immutable `github.sha`, not a moving
+branch or a typed tag. Build validates strict source `X.Y.Z` before native work.
+Publication is serialized across all branches by a constant concurrency group,
+without cancelling running builds. There is no new default-branch-only gate.
+
+The release authority is the three project-level `MARKETING_VERSION` settings in
+`File.xcodeproj/project.pbxproj`. The original Bump header explicitly promised
+coordinating `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` and source
+`CFBundleShortVersionString`/`CFBundleVersion`. Its marketing-first implementation
+and commits `805eaf2`, `b0c4816` and `fc30ab4` left current at `1.0.0`; that was
+implementation drift, not a separate build-version contract. This migration
+repairs all three current settings and the localized `1.0` display values to the
+existing marketing authority `1.0.3`, without a release-version increment.
+Bump validates and co-bumps both project version keys, the existing applicable
+source plist fields, and the two version-bearing localized strings in
+`English.lproj/InfoPlist.strings`. Valid resolved Xcode references, absent
+`CFBundleVersion`, BOMs, line endings and modes are preserved. Prebuilt
+bundles, localization counters, manifest/schema revisions, 4D projects and
+native dependencies are not version inputs.
+
+Before building and again after Windows/macOS builds, universal verification,
+merge, codesigning, packaging, both notarization submissions and DMG stapling,
+Build checks the exact remote tag and **all authenticated paginated releases,
+including drafts**. A conflict, malformed page/entry, authentication, 404,
+network or later-page error stops publication; only a complete no-match passes.
+It creates `vX.Y.Z` at the selected SHA using create-only `POST git/refs`, verifies
+the remote SHA, then creates a new non-draft, non-prerelease release named
+`vX.Y.Z` with explicit target SHA and an empty body (the original notes policy).
+It separately uploads `File-X.Y.Z.zip` and `File-X.Y.Z.dmg` to that newly returned
+release ID. Existing tags/releases/assets are never reused, updated or clobbered;
+even a same-SHA tag race is rejected.
+
+**Partial publication recovery:** there is no deletion, rollback or retry.
+If tag creation, release creation or an asset upload fails or returns malformed
+data, any tag, release and earlier assets remain. Inspect the workflow error,
+exact remote tag SHA, release ID and assets manually before deciding recovery.
+Do not rerun Build to overwrite partial state: its availability checks will
+reject it. An authorized maintainer must decide how to resolve the retained
+state outside this workflow, or use a separately approved source bump for a new
+version.
+
+### Existing native and signing caveats
+
+Windows remains x64 with the existing hosted-runner v143/Windows SDK 10.0
+overrides for the legacy v140 project. The solution's legacy library search
+paths are retained; no new third-party native dependency is introduced.
+macOS retains the Cocoa/AppKit/CoreGraphics frameworks, deprecated Carbon
+File Manager APIs, universal arm64/x86_64 requirement, and the workflow's
+deployment-target override (`10.13`) despite project settings (`11.5`).
+Compatibility with future hosted Xcode/SDK versions is not asserted by this
+workflow-only migration; native compilation may expose existing API/target
+limitations. Certificate import, identity discovery, strict codesign verification,
+both notary submissions and DMG stapling remain required. Existing secret names
+are unchanged: `APPLE_DEVELOPER_ID_CERTIFICATE`,
+`APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`,
+`NOTARYTOOL_APPLE_ID`, `NOTARYTOOL_TEAM_ID`, `NOTARYTOOL_PASSWORD`.
+No signing or native gate is skipped to work around runner or credential failures.
+
+Local lifecycle checks (no native build or signing):
+
+```sh
+actionlint .github/workflows/bump-version.yml .github/workflows/release.yml
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .github/tests -p 'test_*.py'
+```
+
 ---
 
 ## Requirements & platform notes
