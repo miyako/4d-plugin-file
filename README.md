@@ -29,16 +29,17 @@ Publication is serialized across all branches by a constant concurrency group,
 without cancelling running builds. There is no new default-branch-only gate.
 
 The release authority is the three project-level `MARKETING_VERSION` settings in
-`File.xcodeproj/project.pbxproj`. The original Bump workflow selected marketing
-first and used current only as a fallback; commits `805eaf2`, `b0c4816` and
-`fc30ab4` incremented marketing and source `Info.plist` while retaining
-`CURRENT_PROJECT_VERSION = 1.0.0`. That independent build metadata is validated
-but not incremented or synchronized to marketing. Bump changes only marketing,
-the existing source `CFBundleShortVersionString`, and the two version-bearing
-strings in `English.lproj/InfoPlist.strings`. The legacy localized `1.0` values
-were repaired to the existing authority `1.0.3` in this migration, not a new
-release version. Valid resolved Xcode references, absent `CFBundleVersion`,
-independent build values, BOMs, line endings and modes are preserved. Prebuilt
+`File.xcodeproj/project.pbxproj`. The original Bump header explicitly promised
+coordinating `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` and source
+`CFBundleShortVersionString`/`CFBundleVersion`. Its marketing-first implementation
+and commits `805eaf2`, `b0c4816` and `fc30ab4` left current at `1.0.0`; that was
+implementation drift, not a separate build-version contract. This migration
+repairs all three current settings and the localized `1.0` display values to the
+existing marketing authority `1.0.3`, without a release-version increment.
+Bump validates and co-bumps both project version keys, the existing applicable
+source plist fields, and the two version-bearing localized strings in
+`English.lproj/InfoPlist.strings`. Valid resolved Xcode references, absent
+`CFBundleVersion`, BOMs, line endings and modes are preserved. Prebuilt
 bundles, localization counters, manifest/schema revisions, 4D projects and
 native dependencies are not version inputs.
 

@@ -1,4 +1,4 @@
-"""Source display versions only; independent build, prebuilt and 4D counters are excluded."""
+"""Coordinated source metadata; prebuilt bundles and 4D counters are excluded."""
 
 import argparse
 import plistlib
@@ -11,7 +11,6 @@ PLIST = Path("Info.plist")
 LOCALIZED = Path("English.lproj/InfoPlist.strings")
 SOURCE_PATHS = (PROJECT, PLIST, LOCALIZED)
 VERSION = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
-BUILD_VERSION = r"[0-9]+(?:\.[0-9]+){0,2}"
 KEYS = ("MARKETING_VERSION", "CURRENT_PROJECT_VERSION")
 SETTING = re.compile(r"(?m)^(\s*(MARKETING_VERSION|CURRENT_PROJECT_VERSION)\s*=\s*)([^;\n]+)(;)")
 REFERENCES = {f"$({key})": key for key in KEYS}
@@ -51,28 +50,20 @@ def read(root=Path(".")):
     if len(marketing) != 1 or not re.fullmatch(VERSION, next(iter(marketing))):
         raise ValueError("MARKETING_VERSION must be one strict X.Y.Z across configurations")
     version = next(iter(marketing))
-    # The original workflow explicitly selected marketing, with current only a fallback.
-    current = set(fields["CURRENT_PROJECT_VERSION"])
-    if len(current) != 1:
-        raise ValueError("Independent CURRENT_PROJECT_VERSION settings have drifted")
-    build = next(iter(current))
-    if not re.fullmatch(BUILD_VERSION, build) and REFERENCES.get(build) != "MARKETING_VERSION":
-        raise ValueError("CURRENT_PROJECT_VERSION is invalid or cyclic")
-    resolved = {"MARKETING_VERSION": version, "CURRENT_PROJECT_VERSION":
-                version if build in REFERENCES else build}
+    for value in fields["CURRENT_PROJECT_VERSION"]:
+        if value != version and REFERENCES.get(value) != "MARKETING_VERSION":
+            raise ValueError("CURRENT_PROJECT_VERSION is invalid, cyclic or has drifted")
+    resolved = {key: version for key in KEYS}
     with (root / PLIST).open("rb") as stream:
         plist = plistlib.load(stream)
     if not isinstance(plist, dict):
         raise ValueError("Source Info.plist must be a dictionary")
-    value = plist.get("CFBundleShortVersionString")
-    if not isinstance(value, str) or resolved.get(REFERENCES.get(value), value) != version:
-        raise ValueError("CFBundleShortVersionString is missing, invalid, unresolved or has drifted")
-    if "CFBundleVersion" in plist:
-        value = plist["CFBundleVersion"]
-        if not isinstance(value, str) or not re.fullmatch(
-            BUILD_VERSION, resolved.get(REFERENCES.get(value), value)
-        ):
-            raise ValueError("CFBundleVersion is invalid or unresolved")
+    for key in ("CFBundleShortVersionString", "CFBundleVersion"):
+        if key == "CFBundleVersion" and key not in plist:
+            continue
+        value = plist.get(key)
+        if not isinstance(value, str) or resolved.get(REFERENCES.get(value), value) != version:
+            raise ValueError(f"{key} is missing, invalid, unresolved or has drifted")
     localized = text(root / LOCALIZED)
     for pattern in (LOCALIZED_SHORT, LOCALIZED_INFO):
         if [match[2] for match in pattern.finditer(localized)] != [version]:
@@ -89,7 +80,7 @@ def bump(mode, root=Path(".")):
     new = ".".join(map(str, parts))
 
     def replace(match):
-        if match[2] != "MARKETING_VERSION":
+        if unquote(match[3].strip()) in REFERENCES:
             return match[0]
         value = f'"{new}"' if match[3].strip().startswith('"') else new
         return f"{match[1]}{value}{match[4]}"
@@ -98,7 +89,7 @@ def bump(mode, root=Path(".")):
     rewrite(path, lambda value: SETTING.sub(replace, value))
     path = root / PLIST
     rewrite(path, lambda value: re.sub(
-        r"(<key>CFBundleShortVersionString</key>\s*<string>)([^<]*)(</string>)",
+        r"(<key>CFBundle(?:ShortVersionString|Version)</key>\s*<string>)([^<]*)(</string>)",
         lambda m: m[0] if m[2] in REFERENCES else f"{m[1]}{new}{m[3]}",
         value,
     ))
