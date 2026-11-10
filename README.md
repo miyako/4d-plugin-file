@@ -9,6 +9,69 @@ The File plugin converts a file or folder path into a pair of file-system identi
 
 **Platforms:** macOS, Windows
 
+## Native ownership maintenance
+
+The bounded audit baseline is `b5e93ddcf1fef1923f5d5c4e4e206a4629849291`.
+Both native projects compile `4DPlugin.cpp`, the complete bundled
+`4D Plugin API/4DPluginAPI.c`, and every wrapper implementation in
+`4D Plugin API/Classes`. The actual SDK export is `FourDPackex`
+(`4DPluginAPI.def` on Windows), which initializes the engine callback and calls
+`PluginMain` / `CommandDispatcher`. Selectors 1 and 2 implement the two scalar
+`&T;&T;&T):L` commands in `manifest.json`; the prebuilt bundle's manifest is
+the same. Those signatures do not exclude defects in compiled dormant helpers.
+
+| Inventoried native surface | Ownership result / reachability |
+|---|---|
+| `4DPlugin.cpp`, `4DPlugin.h` | Both command handlers and all platform helpers inspected, including dormant `pathGetFileSystemNumbers`, `pathGetReferenceUrl`, and `getFileSystemPath`. Text parameters copy into `C_TEXT`; native Create/Copy results are released after copying. |
+| `C_TEXT.{cpp,h}`, `ARRAY_TEXT.{cpp,h}`, `C_TYPES.h` | Borrowed parameter/array buffers copy into independent C++ strings. Scalar outputs use the SDK content setter. Array outputs independently allocate each element and transfer without subsequent disposal. |
+| `C_PICTURE.{cpp,h}` | Compiled but unused by the dispatcher. Fixed path-argument double disposal, overwritten initial string/picture owners, retained output/temporary leaks, and charset byte-count misuse. Borrowed input pictures detach before argument cleanup; returned pictures remain owning and must be disposed by their consumer. |
+| `C_BLOB.{cpp,h}`, `C_POINTER.{cpp,h}` | Byte storage copies; pointer metadata conversion inspected. `C_POINTER::getVariable` cleanup is deferred because the metadata/value contract is ambiguous. |
+| `C_DATE`, `C_INTEGER`, `C_LONGINT`, `C_REAL`, `C_TIME` (each `.cpp` and `.h`) | Scalar value wrappers, no native string owners. |
+| `ARRAY_BOOLEAN`, `ARRAY_DATE`, `ARRAY_INTEGER`, `ARRAY_LONGINT`, `ARRAY_REAL`, `ARRAY_TIME` (each `.cpp` and `.h`) | Numeric/value arrays inspected, including conversion, resize and cleanup paths; no string transfers. |
+| `4DPluginAPI.{c,h,def}`, `PublicTypes.h`, `PrivateTypes.h`, `EntryPoints.h`, `Flags.h`, `4D Plugin_Prefix.pch` | SDK, ABI, include closure and export boundary inspected, not edited. Xcode sources and Visual Studio compile/include lists include all wrappers; no alternate native SDK or third-party library source is tracked. |
+
+The exact bundled engine's git blob is
+`478081f0238f6bc5393222f574bc2656f010b67b`, SHA-256
+`355ee208ad6c61dcc68e8432546fc42484888211dd07ed8fa3fdb4440f3edbd8`,
+introduced by repository commit `9a7d193bf1eb2b36b9464d16bc288c751b081cf1`.
+The v13/v14 header comments are not independently verified upstream SDK versions;
+there is no SDK dependency lock identifying an upstream distribution.
+
+In this implementation, `PA_SetStringInArray` disposes the old element and
+shallow-transfers only for Unicode arrays with non-null data, index
+`0 <= i <= fNbElements`, and a non-null input descriptor. Rejection retains
+caller ownership; getters borrow. Scalar string/picture setters shallow-alias
+and do not release an existing destination, so use Undefined before assigning
+an existing owner. Typed picture output arguments still start with an owned
+empty picture. `PA_SetUnistring` / `PA_ReturnString` instead invoke an
+engine-backed content setter. `PA_ConvertCharsetToCharset` returns bytes,
+not UTF-16 code units. The SDK command handle-allocation failure returns raw
+kind zero, which `PA_GetVariableKind` misleadingly normalizes to Unistring;
+do not adopt/clear it as a string. Method failure returns Undefined.
+There are no first-party method callbacks, JSON Parse, object or collection
+getter call sites in this repository.
+
+Run `python3 tests/run_native_ownership.py --output <dedicated-temporary-directory>`
+on macOS. This compiles **all actual production native sources plus the full,
+unchanged SDK** with ASan/UBSan, using a tracking engine callback rather than
+substitute API snippets. It does not build/sign/package the plugin. The same
+harness accepts `--source <immutable-git-archive-directory>` for baseline
+comparison. Cases check exact ASCII/BMP/supplementary/empty text, allocated/null
+empty strings, bytes versus units/capacity/termination, transfers and rejection,
+borrowed copies, replacement/shrink/clear, independent synchronous arguments,
+owning returns, failed command handles/commands and explicit string/handle/picture
+balances (macOS LSan is unavailable).
+
+The identical final harness passes 8/28 baseline cases and fails the 20 named
+path double-disposal, picture-balance and `createCopy` over-read regressions;
+corrected sources pass 28/28. The shim models
+the SDK's engine boundary, not a real 4D host. Windows/real-4D execution remains
+unverified. Picture-data metadata string ownership and SDK-only app-path
+outputs are deferred rather than guessed. Normal array tests do not certify
+the SDK's unrelated resize-OOM count-corruption behavior. Manifests, native
+projects, SDK files, prebuilt binaries and manual publication workflows remain
+unchanged; the separate Native ownership CI only compiles and runs unsigned tests.
+
 ## Manual versioning and publication
 
 **Bump version** and **Build** are independent manual Actions workflows.
